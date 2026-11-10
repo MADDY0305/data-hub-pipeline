@@ -40,6 +40,7 @@ RECORD_COLUMNS = [
     "sectors", "stages", "ticket_min_usd", "ticket_max_usd", "firm_linkedin", "firm_email",
     "firm_phone", "description", "legal_id",
     "is_individual", "person_name", "title", "contact_email", "contact_phone", "contact_linkedin",
+    "is_enrichment",   # "1" = only fills gaps in firms we already have; never adds a new firm
 ]
 MONEY_ROLES = {"aum", "ticket", "ticket_min", "ticket_max"}
 
@@ -168,6 +169,7 @@ def to_record(values: dict, source_name, source_url, source_file):
         "description": g("description")[:1000],
         "legal_id": g("legal_id"),
         "is_individual": is_individual,     # "1" = the 'firm' is really one person
+        "is_enrichment": "",
         "person_name": person,
         "title": g("title")[:150],
         "contact_email": contact_email,
@@ -236,6 +238,42 @@ def sec_records():
 # ---------------------------------------------------------------------------
 # Blacklists: kept apart - they flag investors, they don't add them
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SEC Form ADV (enrichment only): AUM, website, phone, address of US advisers
+# ---------------------------------------------------------------------------
+def adv_records():
+    out = []
+    for kind, aum_col in (("registered", "5F(2)(c)"), ("exempt", "Total Gross Assets of Private Funds")):
+        path = Path(f"data/raw/sec_adv/{kind}.csv")
+        if not path.exists():
+            continue
+        df = pd.read_csv(path, dtype=str, encoding="latin-1").fillna("")
+        for values in df.itertuples(index=False, name=None):
+            row = dict(zip(df.columns, values))      # {column name: value} for this adviser
+            site = row["Website Address"]
+            base = {
+                "website": site,
+                "firm_linkedin": site if "linkedin.com" in site.lower() else "",
+                "location": f"{row['Main Office City']}, {row['Main Office State']}, {row['Main Office Country']}",
+                "city": row["Main Office City"].title(),
+                "country": row["Main Office Country"],
+                "firm_phone": row["Main Office Telephone Number"],
+                "aum": row[aum_col],
+            }
+            address = ", ".join(x.title() for x in (row["Main Office Street Address 1"], row["Main Office Street Address 2"],
+                                                     row["Main Office City"]) if x)
+            address += f", {row['Main Office State']} {row['Main Office Postal Code']}".rstrip(", ")
+            url = f"https://adviserinfo.sec.gov/firm/summary/{row['Organization CRD#']}"
+            # One record per name the adviser goes by, so name matching has two chances.
+            names = {row["Primary Business Name"], row["Legal Name"]} - {""}
+            for name in names:
+                rec = to_record({**base, "firm_name": name}, "SEC Form ADV (enrichment)", url, f"adv_{kind}.csv")
+                if rec:
+                    rec.update(address=address, legal_id=f"SEC CRD {row['Organization CRD#']}", is_enrichment="1")
+                    out.append(rec)
+    return out
+
+
 def blacklist_rows(path, sheet_title, source_url):
     header, rows = read_table(path)
     norm = [h.lower().strip() for h in header]
@@ -303,6 +341,11 @@ def main():
     sec = sec_records()
     records += sec
     report.append(("sec/form_d", "used" if sec else "SKIP: not downloaded yet", len(sec), len(sec)))
+
+    # 4) SEC Form ADV - enrichment only (dedupe.py uses it just to fill gaps)
+    adv = adv_records()
+    records += adv
+    report.append(("sec_adv", "enrichment" if adv else "SKIP: not downloaded yet", len(adv), len(adv)))
 
     pd.DataFrame(records, columns=RECORD_COLUMNS).to_csv(OUT / "staging_records.csv", index=False)
     pd.DataFrame(blacklist).to_csv(OUT / "blacklist_raw.csv", index=False)

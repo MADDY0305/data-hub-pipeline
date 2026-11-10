@@ -28,6 +28,10 @@ import pandas as pd
 from transform.clean import LP_TYPES, firm_key, merge_lists, person_key
 
 OUT = Path("data/clean")
+# Fields an enrichment source may fill (investor column -> staging column).
+ENRICH_FIELDS = {"website": "website", "country": "country", "city": "city", "address": "address",
+                 "aum_usd": "aum_usd", "firm_linkedin": "firm_linkedin", "firm_phone": "firm_phone",
+                 "firm_email": "firm_email", "legal_id": "legal_id", "description": "description"}
 
 
 def majority(values):
@@ -47,10 +51,12 @@ def joined(values, sep=" ; ", limit=30):
     return sep.join(out[:limit])
 
 
-def assign_firm_ids(rec: pd.DataFrame) -> pd.Series:
-    """Give every staging record a firm number; same number = same firm."""
-    rec = rec.assign(name_key=rec.firm_name.map(firm_key))
-    firm_id = pd.Series(-1, index=rec.index)
+def assign_firm_ids(all_rec: pd.DataFrame) -> pd.Series:
+    """Give every staging record a firm number; same number = same firm.
+    Main records form the firms; enrichment records may only JOIN a firm."""
+    all_rec = all_rec.assign(name_key=all_rec.firm_name.map(firm_key))
+    firm_id = pd.Series(-1, index=all_rec.index)
+    rec = all_rec[all_rec.is_enrichment != "1"].copy()
 
     # An individual (e.g. an angel) only joins a website group if a real FIRM
     # has that website - then they're a person at that firm. Otherwise ten
@@ -87,15 +93,37 @@ def assign_firm_ids(rec: pd.DataFrame) -> pd.Series:
         for c, sub in grp.groupby(grp.country.where(grp.country != "", main)):
             firm_id[sub.index] = next_id
             next_id += 1
+
+    # 4) Enrichment records: attach to an EXISTING firm or are dropped (-1).
+    #    First by website; else by name, if exactly one firm has that name
+    #    and the countries don't clash.
+    enr = all_rec[all_rec.is_enrichment == "1"]
+    main = all_rec.loc[rec.index].assign(firm_id=firm_id[rec.index])
+    main = main[main.firm_id >= 0]
+    site_to_id = main[main.website != ""].groupby("website").firm_id.first()
+    name_to_ids = main[main.name_key != ""].groupby("name_key").firm_id.agg(lambda s: set(s))
+    id_country = main[main.country != ""].groupby("firm_id").country.agg(lambda s: s.mode().iat[0])
+    for idx, r in enr.iterrows():
+        if r.website and r.website in site_to_id.index:
+            firm_id[idx] = site_to_id[r.website]
+            continue
+        ids = name_to_ids.get(r.name_key, set())
+        if len(ids) == 1:
+            fid = next(iter(ids))
+            c = id_country.get(fid, "")
+            if not c or not r.country or c == r.country:
+                firm_id[idx] = fid
     return firm_id
 
 
 def build_investors(rec: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for fid, g_all in rec.groupby("firm_id"):
+        enrich = g_all[g_all.is_enrichment == "1"]
+        g_main = g_all[g_all.is_enrichment != "1"]
         # Firm details come from FIRM records; people at the firm only fill gaps.
-        firms_only = g_all[g_all.is_individual != "1"]
-        g = firms_only if len(firms_only) else g_all
+        firms_only = g_main[g_main.is_individual != "1"]
+        g = firms_only if len(firms_only) else g_main
         firm_type = majority(g.firm_type.replace("Other", "")) or ("Other" if (g.firm_type == "Other").any() else "")
         sources = g_all
         lp_source = g.source_name.str.contains(r"\bLPs?\b|limited partner|fund of fund", case=False).any()
@@ -124,6 +152,12 @@ def build_investors(rec: pd.DataFrame) -> pd.DataFrame:
             "source_names": joined(sources.source_name),
             "source_urls": joined(sources.source_url),
         })
+        # ENRICHMENT: only fill fields that are still empty - never overwrite.
+        if len(enrich):
+            row = rows[-1]
+            for field, col in ENRICH_FIELDS.items():
+                if not row[field]:
+                    row[field] = majority(enrich[col])
     inv = pd.DataFrame(rows)
     # Min and max can come from different sources: if min > max, swap them.
     lo = pd.to_numeric(inv.ticket_size_min_usd, errors="coerce")
@@ -192,7 +226,9 @@ def main():
               f"  found in 2+ sources: {(inv.source_count > 1).sum():,}\n"
               f"Contacts: {len(con):,}  (with email: {(con.email != '').sum():,})\n"
               f"Blacklist entries: {len(bl):,}  matched to an investor: {bl.investor_id.notna().sum():,}\n"
-              f"Investors flagged as blacklisted (for at least one client): {inv.is_blacklisted.sum():,}\n")
+              f"Investors flagged as blacklisted (for at least one client): {inv.is_blacklisted.sum():,}\n"
+              f"Investors enriched by SEC Form ADV: "
+              f"{inv.source_names.str.contains('SEC Form ADV', regex=False).sum():,}\n")
     (OUT / "dedupe_report.txt").write_text(report, encoding="utf-8")
     print(report)
 

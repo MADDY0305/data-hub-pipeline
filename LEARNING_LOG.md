@@ -129,6 +129,31 @@ Four scripts in `transform/`, each doing one job:
 **Concepts:** *bulk load (COPY) vs row inserts, transactions/commits, chunking, data types, post-load verification (row-count reconciliation).*
 **You-try:** Run the queries in `sql/003_example_queries.sql` in the Supabase SQL Editor. Then change query 6 to a different client and country.
 
+## Step 12 — Enrichment #1: SEC Form ADV (filling gaps)
+**What is Form ADV?** Every US investment adviser (wealth managers, PE, and many VC firms) must file it with the SEC. The SEC publishes the full list as a free monthly download: ~24,000 firms with **AUM, website, phone and address**.
+- **Form D** = a *fund* raising money ("ABG Defense Tech Fund I").
+- **Form ADV** = the *firm* managing funds ("ABG Capital").
+
+**The key design rule: enrichment only fills gaps.**
+- It never **overwrites** a value our sources already have.
+- It never **adds new investors**. Most of the 24k advisers are wealth managers we don't target, so they only *attach* to firms we already have, matched by website, or by name if exactly one firm has that name and the countries agree.
+- Every enriched firm gets "SEC Form ADV (enrichment)" in `source_names`, so it stays traceable.
+
+**Result (firms, before → after):**
+| Field | Before | After |
+|---|---|---|
+| AUM | 1,878 | **4,412** (more than doubled) |
+| Phone | 16,396 | 18,961 |
+| Address | 17,615 | 19,924 |
+| Legal ID (SEC CRD) | 16,217 | 18,840 |
+
+3,119 firms were enriched, and the investor count stayed at 87,935, as intended.
+
+**Bug of the day:** the script picked the newest files by checking whether the link contained "exempt". But the *folder* name in every link was `...advisers-exempt-reporting-advisers/...`, so every file looked "exempt". *Fix:* check only the **file name**. *Lesson:* match on the most specific part of the text.
+
+**Concepts:** *data enrichment, bulk/reference data, match keys, "fill gaps, never overwrite" (survivorship rules), before/after measurement.*
+**You-try:** In Supabase, run `SELECT firm_name, aum_usd FROM investors WHERE source_names LIKE '%Form ADV%' ORDER BY aum_usd DESC LIMIT 20;`
+
 ---
 
 ## The pipeline so far
