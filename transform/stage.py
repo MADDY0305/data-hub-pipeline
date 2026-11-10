@@ -23,6 +23,7 @@ import glob
 import os
 import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 import openpyxl
 import pandas as pd
@@ -274,6 +275,62 @@ def adv_records():
     return out
 
 
+# ---------------------------------------------------------------------------
+# Firm websites (enrichment only): description, LinkedIn, email, phone
+# ---------------------------------------------------------------------------
+# Descriptions from placeholder pages (parked domains, site builders, "under construction").
+JUNK_DESC = re.compile(r"domain name (registration|has been registered)|parked|domain registriert|"
+                       r"use this space|made with softr|made in notion|doing some work on our site|"
+                       r"website builder|h[ée]bergement web|this domain|buy this domain|godaddy|"
+                       r"squarespace|wix\.com|wordpress\.com|site is under", re.I)
+
+
+def fix_garbled(s: str) -> str:
+    """'ArtÃ©mis' -> 'Artémis'. Happens when a site doesn't say its text encoding and
+    UTF-8 bytes get read as Western-European ones. Reverse that, if it works cleanly."""
+    if not re.search(r"Ã|Â|â€", s):
+        return s
+    for enc in ("cp1252", "latin-1"):
+        try:
+            return s.encode(enc).decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return s
+
+
+def same_brand(domain: str, final_url: str) -> bool:
+    """Did the site stay with the SAME firm? 'phoenicianfunds.com' -> 'phoenician.vc' yes;
+    'tdameritrade.com' -> 'schwab.com' no (taken over - data describes another firm)."""
+    host = re.sub(r"^www\d?\.", "", urlparse(final_url).netloc.lower().split(":")[0])
+    if host == domain or host.endswith("." + domain) or domain.endswith("." + host):
+        return True
+    a, b = domain.split(".")[0], (host.split(".")[-2] if host.count(".") else host)
+    return len(os.path.commonprefix([a, b])) >= 4
+
+
+def website_records():
+    path = Path("data/raw/websites/results.csv")
+    if not path.exists():
+        return []
+    df = pd.read_csv(path, dtype=str).fillna("")
+    out = []
+    for r in df[df.status == "ok"].itertuples():
+        # A site that now forwards to a different firm tells us about THAT firm - skip it.
+        if not same_brand(r.domain, r.final_url):
+            continue
+        desc = fix_garbled(r.description)
+        if JUNK_DESC.search(desc):
+            desc = ""
+        # firm_name is only a placeholder: these records attach to a firm by WEBSITE.
+        rec = to_record({"firm_name": r.domain, "website": r.domain, "description": desc,
+                         "firm_linkedin": r.linkedin, "firm_email": r.email, "firm_phone": r.phone},
+                        "Firm website (enrichment)", r.final_url, "websites.csv")
+        if rec:
+            rec["is_enrichment"] = "1"
+            out.append(rec)
+    return out
+
+
 def blacklist_rows(path, sheet_title, source_url):
     header, rows = read_table(path)
     norm = [h.lower().strip() for h in header]
@@ -346,6 +403,11 @@ def main():
     adv = adv_records()
     records += adv
     report.append(("sec_adv", "enrichment" if adv else "SKIP: not downloaded yet", len(adv), len(adv)))
+
+    # 5) Firm websites - enrichment only
+    web = website_records()
+    records += web
+    report.append(("websites", "enrichment" if web else "SKIP: not visited yet", len(web), len(web)))
 
     pd.DataFrame(records, columns=RECORD_COLUMNS).to_csv(OUT / "staging_records.csv", index=False)
     pd.DataFrame(blacklist).to_csv(OUT / "blacklist_raw.csv", index=False)

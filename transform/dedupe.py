@@ -228,7 +228,9 @@ def main():
               f"Blacklist entries: {len(bl):,}  matched to an investor: {bl.investor_id.notna().sum():,}\n"
               f"Investors flagged as blacklisted (for at least one client): {inv.is_blacklisted.sum():,}\n"
               f"Investors enriched by SEC Form ADV: "
-              f"{inv.source_names.str.contains('SEC Form ADV', regex=False).sum():,}\n")
+              f"{inv.source_names.str.contains('SEC Form ADV', regex=False).sum():,}\n"
+              f"Investors enriched from their own website: "
+              f"{inv.source_names.str.contains('Firm website', regex=False).sum():,}\n")
     (OUT / "dedupe_report.txt").write_text(report, encoding="utf-8")
     print(report)
 

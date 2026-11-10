@@ -154,13 +154,44 @@ Four scripts in `transform/`, each doing one job:
 **Concepts:** *data enrichment, bulk/reference data, match keys, "fill gaps, never overwrite" (survivorship rules), before/after measurement.*
 **You-try:** In Supabase, run `SELECT firm_name, aum_usd FROM investors WHERE source_names LIKE '%Form ADV%' ORDER BY aum_usd DESC LIMIT 20;`
 
+## Step 13 — Enrichment #2: each firm's own website (web scraping, done politely)
+**Why:** 28,746 firms had a website but were missing a description, LinkedIn page, email or phone. The firm's own homepage usually has all four, and it's free and written by the firm itself.
+
+**How (4 stages):**
+1. **Pick:** only firms with a website *and* at least one missing field (`extract/websites.py`).
+2. **Visit politely:** check `robots.txt` first; read the homepage, plus the contact page only if email or phone is still missing; max 2 pages per site, 3 seconds apart. 48 *different* sites are read at once, so each site still sees a slow, gentle visitor.
+3. **Extract:** description (the site's own summary), LinkedIn company link, email **on the firm's own domain only** (`info@` first; `jobs@` and `press@` skipped), and phone from click-to-call links.
+4. **Fill gaps only:** like Form ADV, the results become *enrichment* records. They fill empty fields, never overwrite, and never create new firms. Anything still missing stays **empty**; we never guess.
+
+**Bug of the day: the silent freeze.** After 775 sites, the run stopped writing but didn't crash. Some sites never answer (or send one byte every few seconds), and `requests`' timeout only measures *silence between bytes*, not total time. One by one, all 48 workers got stuck.
+*Fix:* a **watchdog**: each page gets at most 25 seconds and each site 2 minutes, then it's marked `timeout` and a fresh site takes its place. Progress is now saved every few seconds.
+*Lesson:* long jobs need **hard deadlines** and **progress checks**. "No error" doesn't mean "working". Always look at whether the output is still growing.
+
+**Quality checks before using the data (in `transform/stage.py`):**
+- **Redirects:** 1,936 sites forward to a different address. We keep the data only if it's the same brand (`phoenicianfunds.com` → `phoenician.vc` ✅). A takeover (`tdameritrade.com` → `schwab.com` ❌) describes a *different* firm, so it's skipped.
+- **Placeholder pages:** descriptions like "This domain is parked" or "Use this space to add…" are thrown away. *Tip:* find junk by looking for **text that repeats across many sites**.
+- **Garbled accents:** "ArtÃ©mis" → "Artémis" (110 fixed). This happens when a site doesn't say which text encoding it uses.
+
+**Result:** 28,746 sites visited; 21,030 answered (73%); the rest were down, blocked or too slow. All 87,935 investors kept (none added), and 19,441 were enriched.
+| Field | Before | After | Gain |
+|---|---|---|---|
+| Description | 30,859 | **35,754** | +4,895 |
+| LinkedIn | 16,897 | **21,794** | +4,897 |
+| Firm email | 3,648 | **10,588** | +6,940 (almost 3×) |
+| Firm phone | 19,335 | **22,718** | +3,383 |
+
+**Check:** we compared every field before vs after. No value from an original source was overwritten. 89 values that came from Form ADV changed, because the two enrichment sources now vote together; most were the same phone number written differently.
+
+**Concepts:** *web scraping, robots.txt, rate limiting, parallelism (threads), timeouts vs. deadlines, watchdog, resumable jobs.*
+**You-try:** Open `data/raw/websites/results.csv` in Excel and filter the `status` column. How many are `ok`? What other failure reasons do you see?
+
 ---
 
 ## The pipeline so far
 ```
-EXTRACT   ✅ Google Sheets (86)  ✅ Airtable OCR (16)  ⏳ SEC API  ⬜ LinkedIn, registers, websites
-TRANSFORM ✅ map columns → clean → de-duplicate → flag blacklist (71,754 investors, 40,014 contacts)
-LOAD      ✅ SQLite (test/backup) + Supabase (main): 71,754 investors, 40,014 contacts, 3,327 blacklist rows
+EXTRACT   ✅ Google Sheets (86)  ✅ Airtable OCR (16)  ✅ SEC Form D API  ✅ SEC Form ADV bulk  ✅ firm websites (21k)  ⬜ LinkedIn (manual), registers
+TRANSFORM ✅ map columns → clean → de-duplicate → enrich (fill gaps) → flag blacklist
+LOAD      ✅ SQLite (backup) + Supabase (main): 87,935 investors, 68,231 contacts, 3,327 blacklist rows, 123 sources
 ```
 
 ## Words to know
@@ -178,3 +209,7 @@ LOAD      ✅ SQLite (test/backup) + Supabase (main): 71,754 investors, 40,014 c
 | SQLAlchemy | Python library that talks to any database |
 | Connection string | The "address + login" of a database, in one line |
 | Entity resolution | Working out which records are the same real-world firm |
+| Enrichment | Filling missing fields from an extra source |
+| robots.txt | A site's file saying which pages robots may read |
+| Watchdog | A check that stops any task running longer than its deadline |
+| Resumable job | A long job that can stop and continue where it left off |
