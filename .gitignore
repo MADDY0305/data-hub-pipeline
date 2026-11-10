@@ -1,0 +1,16 @@
+# Secrets - never upload these
+.env
+google_key.json
+google_oauth_client.json
+google_token.json
+*.json.key
+
+# Data files (can be large / contain personal data)
+data/raw/
+data/clean/
+
+# Python clutter
+.venv/
+__pycache__/
+*.pyc
+data/warehouse.db

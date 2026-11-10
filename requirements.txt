@@ -1,0 +1,17 @@
+pandas
+requests
+beautifulsoup4
+playwright
+openpyxl
+gspread
+google-auth
+rapidfuzz
+sqlalchemy
+psycopg2-binary
+python-dotenv
+pdfplumber
+rapidocr-onnxruntime
+onnxruntime==1.20.1
+google-auth-oauthlib
+google-api-python-client
+pycountry
