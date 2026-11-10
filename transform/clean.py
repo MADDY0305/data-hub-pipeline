@@ -312,7 +312,9 @@ def clean_money(value) -> str:
         return ""
     n = float(m.group(1)) * {"bn": 1e9, "billion": 1e9, "b": 1e9, "mm": 1e6, "million": 1e6,
                              "m": 1e6, "k": 1e3, "thousand": 1e3}.get(m.group(2) or "", 1)
-    return str(int(n)) if n >= 1000 else ""
+    # Above $15 trillion is impossible (the world's largest manager is ~$11T):
+    # the source must have mixed up its units, so the value can't be trusted.
+    return str(int(n)) if 1000 <= n <= 15e12 else ""
 
 
 def money_range(value) -> tuple[str, str]:

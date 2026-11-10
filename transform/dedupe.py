@@ -125,6 +125,12 @@ def build_investors(rec: pd.DataFrame) -> pd.DataFrame:
             "source_urls": joined(sources.source_url),
         })
     inv = pd.DataFrame(rows)
+    # Min and max can come from different sources: if min > max, swap them.
+    lo = pd.to_numeric(inv.ticket_size_min_usd, errors="coerce")
+    hi = pd.to_numeric(inv.ticket_size_max_usd, errors="coerce")
+    flip = lo > hi
+    inv.loc[flip, ["ticket_size_min_usd", "ticket_size_max_usd"]] = \
+        inv.loc[flip, ["ticket_size_max_usd", "ticket_size_min_usd"]].values
     inv.insert(0, "investor_id", range(1, len(inv) + 1))
     return inv
 

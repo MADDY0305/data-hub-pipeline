@@ -29,7 +29,7 @@ import pandas as pd
 
 from transform.clean import (clean_country, clean_email, clean_firm_type, clean_linkedin, clean_money,
                              clean_name, clean_phone, clean_text, clean_website, city_from_text,
-                             country_from_text, email_domain, money_range, split_name_headline)
+                             country_from_text, email_domain, money_range, person_key, split_name_headline)
 from transform.mapping import map_columns, read_table, skip_reason
 
 OUT = Path("data/clean")
@@ -41,6 +41,39 @@ RECORD_COLUMNS = [
     "firm_phone", "description", "legal_id",
     "is_individual", "person_name", "title", "contact_email", "contact_phone", "contact_linkedin",
 ]
+MONEY_ROLES = {"aum", "ticket", "ticket_min", "ticket_max"}
+
+
+def header_unit(header: str) -> str:
+    """Unit written in a column header -> text to append to each value."""
+    h = header.lower()
+    if re.search(r"\b(bn|billion|billions|\$b)\b|\(b\)", h):
+        return " billion"
+    if re.search(r"\b(mn|mm|mio|million|millions|\$m)\b|\(m\)|\(usd m\)|\(eur m\)", h):
+        return " million"
+    if re.search(r"\b(k|thousand|thousands|\$k)\b|\(k\)", h):
+        return " thousand"
+    return ""
+
+
+def email_fits_person(email: str, person: str, firm_site: str) -> bool:
+    """Does this email plausibly belong to this person (or their firm)?
+    'maurice@souterinvestments.com' fits 'Maurice Shamash'; 'jesse.cordoba@x.com'
+    does NOT fit 'Jonas Agrup'. Generic firm mailboxes on the firm's domain fit too."""
+    local, _, domain = email.partition("@")
+    if firm_site and (domain == firm_site or domain.endswith("." + firm_site)):
+        return True
+    letters = re.sub(r"[^a-z]", "", local.lower())
+    names = [n for n in re.sub(r"[^a-z ]", " ", person_key(person)).split() if len(n) >= 2]
+    if not names or not letters:
+        return False
+    first, last = names[0], names[-1]
+    return (any(len(n) >= 3 and n in letters for n in names)          # 'maurice', 'shamash'
+            or (len(letters) >= 3 and letters[0] == first[0]          # 'tom' -> 'thomas'
+                and re.search(".*".join(map(re.escape, letters)), first) is not None)
+            or letters in (first[0] + last, first + last[0], first[0] + last[0]))  # jdoe, johnd, jd
+
+
 BAD_NAME = re.compile(r"^(\*|disclaimer|total|grand total|name|investor name|n/?a$)", re.I)
 
 
@@ -103,17 +136,30 @@ def to_record(values: dict, source_name, source_url, source_file):
 
     contact_email = clean_email(g("contact_email"))
     firm_email = clean_email(g("firm_email"))
-    website = (clean_website(g("website")) or email_domain(firm_email) or email_domain(contact_email))
+    own_site = clean_website(g("website"))
+    # Shifted rows can give a person someone else's email: keep it only if it fits.
+    if contact_email and person and not email_fits_person(contact_email, person, own_site):
+        contact_email = ""
+    website = own_site or email_domain(firm_email) or email_domain(contact_email)
     location = g("location")
     address = location if re.search(r"\d", location) else ""   # has a street number -> address
     tmin, tmax = money_range(g("ticket"))
+    # Separate "Min ticket" / "Max ticket" columns beat a combined range.
+    if g("ticket_min"):
+        tmin = money_range(g("ticket_min"))[0]
+        tmax = money_range(g("ticket_max"))[1] if g("ticket_max") else ("" if not g("ticket") else tmax)
+    elif g("ticket_max"):
+        tmax = money_range(g("ticket_max"))[1]
+    aum = clean_money(g("aum"))
+    if aum and int(aum) < 1_000_000:        # AUM under $1M isn't plausible -> unit was lost
+        aum = ""
     return {
         "source_name": source_name, "source_url": source_url, "source_file": source_file,
         "firm_name": firm, "firm_type": firm_type, "website": website,
         "country": clean_country(g("country")) or country_from_text(location) or country_from_text(g("state")),
         "city": clean_name(g("city")) or city_from_text(location),
         "address": address,
-        "aum_usd": clean_money(g("aum")),
+        "aum_usd": aum,
         "sectors": g("sectors")[:300], "stages": g("stages")[:200],
         "ticket_min_usd": tmin, "ticket_max_usd": tmax,
         "firm_linkedin": clean_linkedin(g("firm_linkedin")),
@@ -137,12 +183,14 @@ def records_from_file(path, source_name, source_url, is_ocr=False):
         roles[0] = "firm_name"                # OCR misread the name header; column 1 is the name
     if not ({"firm_name", "person_name", "first_name"} & set(roles.values())):
         return [], len(rows), "SKIP: no name column"
+    # Money columns may state their unit in the HEADER: "AUM (USD MN)", "Ticket ($k)".
+    units = {i: header_unit(header[i]) for i, r in roles.items() if r in MONEY_ROLES}
     out = []
     for row in rows:
         values = {}
         for i, role in roles.items():
             if i < len(row) and row[i].strip():
-                values[role] = row[i]
+                values[role] = row[i] + units.get(i, "")   # '2,134' + ' million'
         rec = to_record(values, source_name, source_url, os.path.basename(path))
         if rec:
             out.append(rec)
