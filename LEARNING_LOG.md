@@ -185,13 +185,26 @@ Four scripts in `transform/`, each doing one job:
 **Concepts:** *web scraping, robots.txt, rate limiting, parallelism (threads), timeouts vs. deadlines, watchdog, resumable jobs.*
 **You-try:** Open `data/raw/websites/results.csv` in Excel and filter the `status` column. How many are `ok`? What other failure reasons do you see?
 
+## Step 14 — Duplicate audit (checking our own work)
+**Why:** dedupe ran without errors, but "no errors" doesn't mean "no duplicates". So we **audited** the output: we counted rows that share a website, and rows with the same cleaned name + country.
+
+**Found and fixed two problems (in `transform/dedupe.py`):**
+1. **Fake websites on people:** angel investors got their *email's* domain as a website (11 Bain people with `bain.com`, 10 alumni with `stanfordalumni.org`). *Fix:* `drop_personal_sites()` removes a person's website unless a real firm has it. Result: rows sharing a website went from 1,764 to **2**.
+2. **One firm, several websites:** "Bessemer" appeared with `bessemer.com`, `bvp.com` and `bessemerinvestors.com`. *Fix:* `merge_same_name_sites()` joins website groups with the same name and no clashing country.
+   - **The first version was too loose:** a spot-check of 25 random merges showed about 1 in 4 was wrong (Norwest + `evercore.com`), because some sources give a firm someone's employer's website. *Fix:* a site only joins if it **looks like the name** (`atlasven.com` ↔ Atlas Ventures, `bvp.com` ↔ initials of Bessemer Venture Partners). Re-check: about 29 of 30 correct.
+
+**Result:** 87,935 → **87,215 investors** (720 duplicates merged). 571 same-name rows are left on purpose because they're unclear. *Rule:* a wrong merge destroys data, while a missed merge only leaves an extra row, so when in doubt, keep them apart.
+
+**Concepts:** *data-quality audit, false merge vs. missed merge (precision vs. recall), spot-checking random samples, union-find.*
+**You-try:** In Supabase, run `SELECT website, COUNT(*) FROM investors WHERE website IS NOT NULL GROUP BY website HAVING COUNT(*) > 1;` It should return only 1 row.
+
 ---
 
 ## The pipeline so far
 ```
 EXTRACT   ✅ Google Sheets (86)  ✅ Airtable OCR (16)  ✅ SEC Form D API  ✅ SEC Form ADV bulk  ✅ firm websites (21k)  ⬜ LinkedIn (manual), registers
 TRANSFORM ✅ map columns → clean → de-duplicate → enrich (fill gaps) → flag blacklist
-LOAD      ✅ SQLite (backup) + Supabase (main): 87,935 investors, 68,231 contacts, 3,327 blacklist rows, 123 sources
+LOAD      ✅ SQLite (backup) + Supabase (main): 87,215 investors, 68,168 contacts, 3,327 blacklist rows, 124 sources
 ```
 
 ## Words to know

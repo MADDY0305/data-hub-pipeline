@@ -19,6 +19,7 @@ are matched to firms and flagged per client.
 Output (data/clean/):  investors.csv  contacts.csv  blacklist.csv  dedupe_report.txt
 Run:  .venv/Scripts/python -m transform.dedupe
 """
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,73 @@ def joined(values, sep=" ; ", limit=30):
     return sep.join(out[:limit])
 
 
+def drop_personal_sites(rec: pd.DataFrame) -> pd.DataFrame:
+    """An individual's "website" usually comes from their email (bain.com,
+    stanfordalumni.org). Unless a real FIRM in our data has that website, it's
+    their employer or school, not theirs - so remove it. Otherwise 11 different
+    Bain people would all show bain.com, and website data would attach to them."""
+    main = rec.is_enrichment != "1"
+    firm_sites = set(rec.loc[main & (rec.is_individual != "1") & (rec.website != ""), "website"])
+    lone = main & (rec.is_individual == "1") & ~rec.website.isin(firm_sites)
+    return rec.assign(website=rec.website.where(~lone, ""))
+
+
+# Names too generic to prove two websites are the same firm.
+GENERIC_NAMES = {"ventures", "capital", "partners", "investments", "holdings", "holding", "group", "fund",
+                 "family office", "angel", "angels", "investor", "investors", "vc", "private equity",
+                 "asset management", "management", "advisors", "advisory", "foundation", "trust", "n a"}
+MAX_SITES_PER_NAME = 5      # a name on more sites than this is probably generic, not one firm
+
+
+def site_fits_name(site: str, key: str) -> bool:
+    """Does the website look like the firm's name?
+    'atlasven.com' ~ 'atlas ventures' (starts with the name's first 4 letters)
+    'bvp.com'      ~ 'bessemer venture partners' (starts with its initials)"""
+    label = re.sub(r"^(www\d?|en|www2)\.", "", site).split(".")[0].replace("-", "")
+    words = key.split()
+    joined = "".join(words)
+    initials = "".join(w[0] for w in words)
+    return (label[:4] == joined[:4]) or (len(initials) >= 2 and label.startswith(initials))
+
+
+def merge_same_name_sites(with_site: pd.DataFrame, site_ids: dict) -> dict:
+    """Merge website groups that share a cleaned firm name and whose countries
+    don't clash. Uses 'union-find': every site points to a 'leader' site, and
+    merging two groups just points one leader at the other."""
+    leader = {s: s for s in site_ids}
+
+    def find(s):
+        while leader[s] != s:
+            leader[s] = leader[leader[s]]     # shortcut the chain as we go
+            s = leader[s]
+        return s
+
+    country = with_site[with_site.country != ""].groupby("website").country.agg(lambda s: s.mode().iat[0])
+    firms = with_site[with_site.is_individual != "1"]     # people's names never merge websites
+    for key, sites in firms.groupby("name_key").website.agg(lambda s: sorted(set(s))).items():
+        if not key or key in GENERIC_NAMES or len(key.replace(" ", "")) < 4:
+            continue
+        # Only websites that LOOK like the name: some sources give a firm someone's
+        # employer's site (Norwest -> evercore.com), which would chain firms together.
+        sites = [s for s in sites if site_fits_name(s, key)]
+        if not 2 <= len(sites) <= MAX_SITES_PER_NAME:
+            continue
+        # Sites per country; sites with no country join the biggest country group.
+        by_c = {}
+        for s in sites:
+            by_c.setdefault(country.get(s, ""), []).append(s)
+        blank = by_c.pop("", [])
+        if by_c:
+            biggest = max(by_c, key=lambda c: len(by_c[c]))
+            by_c[biggest] += blank
+        else:
+            by_c[""] = blank
+        for group in by_c.values():
+            for s in group[1:]:
+                leader[find(s)] = find(group[0])
+    return {s: site_ids[find(s)] for s in site_ids}
+
+
 def assign_firm_ids(all_rec: pd.DataFrame) -> pd.Series:
     """Give every staging record a firm number; same number = same firm.
     Main records form the firms; enrichment records may only JOIN a firm."""
@@ -68,8 +136,11 @@ def assign_firm_ids(all_rec: pd.DataFrame) -> pd.Series:
     # 1) Website groups
     with_site = rec[rec.website != ""]
     site_ids = {d: i for i, d in enumerate(with_site.website.unique())}
+    # 1b) One firm, several websites ("7percent Ventures": 7pc.co, 7pc.vc, 7percent.vc).
+    #     Website groups with the SAME cleaned name and no clashing country = same firm.
+    site_ids = merge_same_name_sites(with_site, site_ids)
     firm_id[with_site.index] = with_site.website.map(site_ids)
-    next_id = len(site_ids)
+    next_id = max(site_ids.values(), default=-1) + 1
 
     # Which website groups does each name belong to, and in which countries?
     name_to_sites = with_site.groupby("name_key").website.agg(lambda s: set(s))
@@ -79,8 +150,8 @@ def assign_firm_ids(all_rec: pd.DataFrame) -> pd.Series:
     no_site = rec[(rec.website == "") & (rec.name_key != "")]
     for key, grp in no_site.groupby("name_key"):
         sites = name_to_sites.get(key, set())
-        if len(sites) == 1:
-            site = next(iter(sites))
+        if len({site_ids[s] for s in sites}) == 1:      # all its websites belong to ONE firm
+            site = sorted(sites)[0]
             c = site_country.get(site, "")
             fits = grp.country.isin(["", c]) if c else pd.Series(True, index=grp.index)
             firm_id[grp[fits].index] = site_ids[site]
@@ -203,6 +274,7 @@ def match_blacklist(inv: pd.DataFrame, bl: pd.DataFrame, rec: pd.DataFrame) -> p
 def main():
     rec = pd.read_csv(OUT / "staging_records.csv", dtype=str).fillna("")
     print(f"Staging records in: {len(rec):,}")
+    rec = drop_personal_sites(rec)
     rec["firm_id"] = assign_firm_ids(rec)
     rec = rec[rec.firm_id >= 0]
 
