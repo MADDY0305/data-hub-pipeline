@@ -18,6 +18,7 @@ Supabase (Postgres)  →  query with SQL
 ## Docs
 | File | Read it for |
 |---|---|
+| [REPORT.md](REPORT.md) | **Final findings: what's in the warehouse and how complete it is** |
 | [PIPELINE_PLAN.md](PIPELINE_PLAN.md) | The big picture: tools, roles, roadmap |
 | [SETUP.md](SETUP.md) | One-time setup: accounts and keys |
 | [DATA_DICTIONARY.md](DATA_DICTIONARY.md) | What every column means |
